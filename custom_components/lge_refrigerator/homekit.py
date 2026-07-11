@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import qrcode
+import qrcode.image.svg
+from aiohttp import web
 from homeassistant.components import persistent_notification, zeroconf
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
@@ -18,6 +23,7 @@ from .const import (
     CONF_HOMEKIT_NAME,
     CONF_HOMEKIT_PIN,
     CONF_HOMEKIT_PORT,
+    DATA_HOMEKIT,
     DOMAIN,
     FEATURE_ECO_FRIENDLY,
     FEATURE_EXPRESS_FREEZER,
@@ -42,6 +48,20 @@ _FEATURE_NAMES = {
     FEATURE_EXPRESS_FRIDGE: "Express Fridge",
     FEATURE_ICE_PLUS: "Ice Plus",
 }
+
+_BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _base36_encode(value: int) -> str:
+    """Encode an integer with the alphabet mandated by HomeKit setup URIs."""
+    if value == 0:
+        return "0"
+
+    encoded = ""
+    while value:
+        value, remainder = divmod(value, 36)
+        encoded = _BASE36_ALPHABET[remainder] + encoded
+    return encoded
 
 
 class LGERefrigeratorAccessory(Accessory):
@@ -224,6 +244,44 @@ class LGERefrigeratorHomeKitBridge:
         self._remove_stop_listener: Callable[[], None] | None = None
         self._driver_started = False
 
+    @property
+    def homekit_qr_url(self) -> str:
+        """Return the authenticated QR endpoint rendered in the notification."""
+        return f"/api/{DOMAIN}/homekit_qr/{self.entry.entry_id}"
+
+    def homekit_pairing_uri(self) -> str:
+        """Build the stable HomeKit setup URI from pyhap's persisted state."""
+        pincode = self.driver.state.pincode
+        if isinstance(pincode, bytes):
+            pincode = pincode.decode()
+
+        payload = 0
+        payload |= 0 & 0x7  # Setup URI version.
+        payload <<= 4
+        payload |= 0 & 0xF  # Reserved bits.
+        payload <<= 8
+        payload |= self.accessory.category & 0xFF
+        payload <<= 4
+        payload |= 2 & 0xF  # IP transport supported.
+        payload <<= 27
+        payload |= int(pincode.replace("-", ""), 10) & 0x7FFFFFFF
+
+        encoded_payload = _base36_encode(payload).rjust(9, "0")
+        return f"X-HM://{encoded_payload}{self.driver.state.setup_id}"
+
+    def homekit_qr_svg(self) -> bytes:
+        """Generate a QR image without exposing the pairing code externally."""
+        qr_code = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            border=4,
+            image_factory=qrcode.image.svg.SvgPathFillImage,
+        )
+        qr_code.add_data(self.homekit_pairing_uri())
+        qr_code.make(fit=True)
+        output = BytesIO()
+        qr_code.make_image().save(output)
+        return output.getvalue()
+
     @classmethod
     async def async_create(
         cls,
@@ -258,8 +316,10 @@ class LGERefrigeratorHomeKitBridge:
                 self.hass,
                 (
                     "En Casa: Añadir accesorio > Más opciones > "
-                    f"{self.entry.data[CONF_HOMEKIT_NAME]}. Código HomeKit: "
-                    f"{self.entry.data[CONF_HOMEKIT_PIN]}"
+                    f"{self.entry.data[CONF_HOMEKIT_NAME]}.\n\n"
+                    "Escanea este código QR de HomeKit:\n\n"
+                    f"![Código QR HomeKit]({self.homekit_qr_url})\n\n"
+                    f"O usa el código HomeKit: {self.entry.data[CONF_HOMEKIT_PIN]}"
                 ),
                 title="LGE Refrigerator listo para emparejar",
                 notification_id=f"{DOMAIN}_{self.entry.entry_id}",
@@ -281,6 +341,33 @@ class LGERefrigeratorHomeKitBridge:
     def _async_hass_stop(self, event: Event) -> None:
         """Stop HAP during HA shutdown even if config unloading is skipped."""
         self.hass.async_create_task(self.async_stop())
+
+
+class LGERefrigeratorHomeKitQrView(HomeAssistantView):
+    """Serve an entry's HomeKit QR code to the authenticated HA frontend."""
+
+    url = f"/api/{DOMAIN}/homekit_qr/{{entry_id}}"
+    name = "api:lge_refrigerator:homekit_qr"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: web.Request, entry_id: str) -> web.Response:
+        """Return the QR SVG only for an active integration entry."""
+        entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id)
+        if entry_data is None:
+            raise web.HTTPNotFound
+
+        bridge = entry_data.get(DATA_HOMEKIT)
+        if bridge is None:
+            raise web.HTTPNotFound
+
+        return web.Response(
+            body=bridge.homekit_qr_svg(),
+            content_type="image/svg+xml",
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 class _SharedZeroconfProxy:
