@@ -26,7 +26,7 @@
       },
       "homekit": {
         "title": "HomeKit directo",
-        "description": "Se creará un solo accesorio HomeKit con todos los servicios del refrigerador. El puerto predeterminado 21100 no reutiliza el 21090 fallido.",
+        "description": "Se creará un solo accesorio HomeKit con todos los servicios del refrigerador. El puerto predeterminado es 21100.",
         "data": {
           "homekit_name": "Nombre en Casa",
           "homekit_port": "Puerto HomeKit",
