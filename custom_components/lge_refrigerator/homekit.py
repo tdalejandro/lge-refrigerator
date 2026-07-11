@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timedelta
 import hmac
 from io import BytesIO
 from pathlib import Path
@@ -17,8 +18,9 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_time_interval
 
-from pyhap.accessory import Accessory
+from pyhap.accessory import Accessory, Bridge
 from pyhap.accessory_driver import AccessoryDriver
 
 from .const import (
@@ -66,8 +68,8 @@ def _base36_encode(value: int) -> str:
     return encoded
 
 
-class LGERefrigeratorAccessory(Accessory):
-    """One multi-service HomeKit accessory, not one accessory per HA entity."""
+class LGERefrigeratorCompartmentAccessory(Accessory):
+    """A distinct HomeKit accessory for one refrigerator compartment."""
 
     def __init__(
         self,
@@ -75,44 +77,55 @@ class LGERefrigeratorAccessory(Accessory):
         display_name: str,
         hass: HomeAssistant,
         coordinator: LGERefrigeratorCoordinator,
+        compartment: str,
+        minimum: int,
+        maximum: int,
+        include_device_services: bool,
     ) -> None:
-        """Create only services supported by the selected refrigerator."""
+        """Create one independent temperature tile for HomeKit."""
         super().__init__(driver, display_name)
         self.hass = hass
         self.coordinator = coordinator
+        self._compartment = compartment
+        self._include_device_services = include_device_services
         info = coordinator.device.device_info
         accessory_info = self.get_service("AccessoryInformation")
         accessory_info.configure_char("Manufacturer", value="LG Electronics")
         accessory_info.configure_char("Model", value=info.model_name)
-        accessory_info.configure_char("SerialNumber", value=info.device_id)
-
-        self._fridge_current, self._fridge_target = self._add_thermostat(
-            "Fridge", "fridge", "fridge", -5, 15
+        accessory_info.configure_char(
+            "SerialNumber", value=f"{info.device_id}-{compartment}"
         )
-        self._freezer_current, self._freezer_target = self._add_thermostat(
-            "Freezer", "freezer", "freezer", -35, 10
+
+        self._current, self._target = self._add_thermostat(
+            display_name, compartment, minimum, maximum
         )
 
         self._door_state = None
-        if str(coordinator.data.door_opened_state) != "-":
+        if include_device_services and str(coordinator.data.door_opened_state) != "-":
             door = self.add_preload_service(
                 "ContactSensor", chars=["Name"], unique_id="door"
             )
-            door.configure_char("Name", value="Refrigerator Door")
+            door.configure_char("Name", value="Puerta del refrigerador")
             self._door_state = door.configure_char("ContactSensorState")
 
         self._feature_states: dict[str, Any] = {}
-        for feature, name in _FEATURE_NAMES.items():
-            if coordinator.supports(feature):
-                service = self.add_preload_service("Switch", chars=["Name"], unique_id=feature)
-                service.configure_char("Name", value=name)
-                self._feature_states[feature] = service.configure_char(
-                    "On", setter_callback=lambda value, key=feature: self._set_feature(key, value)
-                )
+        if include_device_services:
+            for feature, name in _FEATURE_NAMES.items():
+                if coordinator.supports(feature):
+                    service = self.add_preload_service(
+                        "Switch", chars=["Name"], unique_id=feature
+                    )
+                    service.configure_char("Name", value=name)
+                    self._feature_states[feature] = service.configure_char(
+                        "On",
+                        setter_callback=lambda value, key=feature: self._set_feature(
+                            key, value
+                        ),
+                    )
 
         self._filter_life = None
         self._filter_indication = None
-        if coordinator.supports(FEATURE_WATER_FILTER):
+        if include_device_services and coordinator.supports(FEATURE_WATER_FILTER):
             service = self.add_preload_service(
                 "FilterMaintenance",
                 chars=["Name", "FilterLifeLevel", "FilterChangeIndication"],
@@ -126,7 +139,6 @@ class LGERefrigeratorAccessory(Accessory):
         self,
         name: str,
         unique_id: str,
-        compartment: str,
         minimum: int,
         maximum: int,
     ) -> tuple[Any, Any]:
@@ -144,15 +156,15 @@ class LGERefrigeratorAccessory(Accessory):
         target = service.configure_char(
             "TargetTemperature",
             properties={"minValue": minimum, "maxValue": maximum, "minStep": 0.1},
-            setter_callback=lambda value: self._set_temperature(compartment, value),
+            setter_callback=self._set_temperature,
         )
         return current, target
 
-    def _set_temperature(self, compartment: str, value: float) -> None:
+    def _set_temperature(self, value: float) -> None:
         """Translate Celsius HAP input to the scale configured in the refrigerator."""
         self.hass.async_create_task(
             self.coordinator.async_set_temperature(
-                compartment, self._from_homekit_celsius(float(value))
+                self._compartment, self._from_homekit_celsius(float(value))
             )
         )
 
@@ -161,10 +173,12 @@ class LGERefrigeratorAccessory(Accessory):
         self.hass.async_create_task(self.coordinator.async_set_feature(feature, bool(value)))
 
     def update_from_coordinator(self) -> None:
-        """Push a single cloud update to all HomeKit services immediately."""
+        """Push one ThinQ update to this compartment's HomeKit services."""
         data = self.coordinator.data
-        self._update_thermostat(data.temp_fridge, self._fridge_current, self._fridge_target)
-        self._update_thermostat(data.temp_freezer, self._freezer_current, self._freezer_target)
+        value = data.temp_fridge if self._compartment == "fridge" else data.temp_freezer
+        self._update_thermostat(value, self._current, self._target)
+        if not self._include_device_services:
+            return
         if self._door_state is not None:
             self._door_state.set_value(
                 CONTACT_OPEN
@@ -182,7 +196,7 @@ class LGERefrigeratorAccessory(Accessory):
                 )
 
     def _update_thermostat(self, value: Any, current: Any, target: Any) -> None:
-        """Update the two HAP temperature characteristics from a ThinQ setting."""
+        """Update this HAP thermostat from its ThinQ setting."""
         raw_value = self._as_float(value)
         if raw_value is None:
             return
@@ -218,7 +232,7 @@ class LGERefrigeratorHomeKitBridge:
         coordinator: LGERefrigeratorCoordinator,
         shared_zeroconf: "_SharedZeroconfProxy",
     ) -> None:
-        """Synchronously construct HAP state, persistence, and one accessory."""
+        """Synchronously construct the HAP bridge and its compartment accessories."""
         self.hass = hass
         self.entry = entry
         self.coordinator = coordinator
@@ -227,8 +241,8 @@ class LGERefrigeratorHomeKitBridge:
         )
         self.driver = AccessoryDriver(
             # pyhap uses ``address`` for the mDNS address as well as its default
-            # bind address.  Leaving it unset lets pyhap select the LAN address
-            # (192.168.68.10 here); bind separately to every interface.
+            # bind address. Leaving it unset selects the host's LAN address;
+            # bind separately to every interface.
             listen_address="0.0.0.0",
             port=entry.data[CONF_HOMEKIT_PORT],
             persist_file=str(persist_file),
@@ -238,16 +252,36 @@ class LGERefrigeratorHomeKitBridge:
         )
         if isinstance(self.driver.state.pincode, str):
             self.driver.state.pincode = self.driver.state.pincode.encode()
-        self.accessory = LGERefrigeratorAccessory(
+
+        self.accessory = Bridge(self.driver, entry.data[CONF_HOMEKIT_NAME])
+        self.refrigerator = LGERefrigeratorCompartmentAccessory(
             self.driver,
-            entry.data[CONF_HOMEKIT_NAME],
+            "Refrigerador",
             hass,
             coordinator,
+            "fridge",
+            -5,
+            15,
+            include_device_services=True,
         )
+        self.freezer = LGERefrigeratorCompartmentAccessory(
+            self.driver,
+            "Congelador",
+            hass,
+            coordinator,
+            "freezer",
+            -35,
+            10,
+            include_device_services=False,
+        )
+        self.accessory.add_accessory(self.refrigerator)
+        self.accessory.add_accessory(self.freezer)
         self.driver.add_accessory(self.accessory)
         self._remove_listener: Callable[[], None] | None = None
         self._remove_stop_listener: Callable[[], None] | None = None
+        self._remove_pairing_watch: Callable[[], None] | None = None
         self._driver_started = False
+        self._notification_id = f"{DOMAIN}_{entry.entry_id}"
         # The notification can fetch this image without a frontend auth header.
         self._homekit_qr_token = secrets.token_urlsafe(32)
 
@@ -312,7 +346,7 @@ class LGERefrigeratorHomeKitBridge:
 
     async def async_start(self) -> None:
         """Start HTTP/mDNS only after status and all HAP services are complete."""
-        self.accessory.update_from_coordinator()
+        self._update_from_coordinator()
         try:
             await self.driver.async_start()
         except Exception:
@@ -321,7 +355,7 @@ class LGERefrigeratorHomeKitBridge:
             raise
         self._driver_started = True
         self._remove_listener = self.coordinator.async_add_listener(
-            self.accessory.update_from_coordinator
+            self._update_from_coordinator
         )
         self._remove_stop_listener = self.hass.bus.async_listen_once(
             EVENT_HOMEASSISTANT_STOP, self._async_hass_stop
@@ -337,14 +371,43 @@ class LGERefrigeratorHomeKitBridge:
                     f"O usa el código HomeKit: {self.entry.data[CONF_HOMEKIT_PIN]}"
                 ),
                 title="LGE Refrigerator listo para emparejar",
-                notification_id=f"{DOMAIN}_{self.entry.entry_id}",
+                notification_id=self._notification_id,
             )
+            self._remove_pairing_watch = async_track_time_interval(
+                self.hass, self._async_check_pairing, timedelta(seconds=5)
+            )
+        else:
+            self._async_dismiss_pairing_notification()
+
+    @callback
+    def _update_from_coordinator(self) -> None:
+        """Update every child accessory from one ThinQ coordinator update."""
+        self.refrigerator.update_from_coordinator()
+        self.freezer.update_from_coordinator()
+
+    @callback
+    def _async_check_pairing(self, _now: datetime) -> None:
+        """Remove the QR prompt promptly after the first HomeKit pairing."""
+        if not self.driver.state.paired:
+            return
+        self._async_dismiss_pairing_notification()
+        if self._remove_pairing_watch:
+            self._remove_pairing_watch()
+            self._remove_pairing_watch = None
+
+    @callback
+    def _async_dismiss_pairing_notification(self) -> None:
+        """Dismiss the temporary pairing QR notification."""
+        persistent_notification.async_dismiss(self.hass, self._notification_id)
 
     async def async_stop(self) -> None:
         """Withdraw mDNS and close HAP cleanly, freeing the configured port."""
         if self._remove_listener:
             self._remove_listener()
             self._remove_listener = None
+        if self._remove_pairing_watch:
+            self._remove_pairing_watch()
+            self._remove_pairing_watch = None
         if self._remove_stop_listener:
             self._remove_stop_listener()
             self._remove_stop_listener = None
@@ -355,6 +418,7 @@ class LGERefrigeratorHomeKitBridge:
     @callback
     def _async_hass_stop(self, event: Event) -> None:
         """Stop HAP during HA shutdown even if config unloading is skipped."""
+        self._remove_stop_listener = None
         self.hass.async_create_task(self.async_stop())
 
 
