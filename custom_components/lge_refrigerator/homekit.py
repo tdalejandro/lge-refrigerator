@@ -226,7 +226,10 @@ class LGERefrigeratorHomeKitBridge:
             hass.config.path(".storage", f"{STORAGE_FILE_PREFIX}{entry.entry_id}.state")
         )
         self.driver = AccessoryDriver(
-            address="0.0.0.0",
+            # pyhap uses ``address`` for the mDNS address as well as its default
+            # bind address.  Leaving it unset lets pyhap select the LAN address
+            # (192.168.68.10 here); bind separately to every interface.
+            listen_address="0.0.0.0",
             port=entry.data[CONF_HOMEKIT_PORT],
             persist_file=str(persist_file),
             pincode=entry.data[CONF_HOMEKIT_PIN].encode(),
