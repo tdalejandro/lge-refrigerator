@@ -10,7 +10,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from .const import DATA_COORDINATOR, DATA_HOMEKIT, DOMAIN, PLATFORMS
 from .coordinator import LGERefrigeratorCoordinator
-from .homekit import LGERefrigeratorHomeKitBridge
+from .homekit import LGERefrigeratorHomeKitBridge, LGERefrigeratorHomeKitQrView
 from .vendor.wideq.core_exceptions import AuthenticationError, InvalidCredentialError
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,6 +22,11 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: LGERefrigeratorConfigEntry
 ) -> bool:
     """Set up one LG ThinQ refrigerator and its single HomeKit accessory."""
+    view_key = f"{DOMAIN}_homekit_qr_view"
+    if view_key not in hass.data:
+        hass.http.register_view(LGERefrigeratorHomeKitQrView(hass))
+        hass.data[view_key] = True
+
     try:
         coordinator = await LGERefrigeratorCoordinator.async_create(hass, entry)
     except ConfigEntryAuthFailed:
@@ -38,17 +43,18 @@ async def async_setup_entry(
         homekit = await LGERefrigeratorHomeKitBridge.async_create(
             hass, entry, coordinator
         )
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+            DATA_COORDINATOR: coordinator,
+            DATA_HOMEKIT: homekit,
+        }
         await homekit.async_start()
     except OSError as err:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
         await coordinator.async_close()
         raise ConfigEntryNotReady(
             f"Unable to bind HomeKit port {entry.data['homekit_port']}"
         ) from err
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
-        DATA_COORDINATOR: coordinator,
-        DATA_HOMEKIT: homekit,
-    }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
