@@ -40,8 +40,9 @@ Google, Apple, Facebook o Amazon, activa el inicio mediante navegador. La
 contraseña no se guarda: Home Assistant conserva solamente el token renovable de
 LG.
 
-El puerto HomeKit predeterminado es `21100`. Tras crear la entrada, el código de
-emparejamiento aparece como notificación persistente de Home Assistant.
+El puerto HomeKit predeterminado es `21100`. Tras crear la entrada, Home Assistant
+muestra una notificación persistente con un QR de emparejamiento y el código PIN
+de respaldo.
 
 ## Límites de LG
 
