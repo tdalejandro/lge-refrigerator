@@ -20,7 +20,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import async_track_time_interval
 
-from pyhap.accessory import Accessory, Bridge
+from pyhap.accessory import Accessory
 from pyhap.accessory_driver import AccessoryDriver
 
 from .const import (
@@ -68,8 +68,8 @@ def _base36_encode(value: int) -> str:
     return encoded
 
 
-class LGERefrigeratorCompartmentAccessory(Accessory):
-    """A distinct HomeKit accessory for one refrigerator compartment."""
+class LGERefrigeratorAccessory(Accessory):
+    """One HomeKit accessory with all refrigerator services."""
 
     def __init__(
         self,
@@ -77,31 +77,26 @@ class LGERefrigeratorCompartmentAccessory(Accessory):
         display_name: str,
         hass: HomeAssistant,
         coordinator: LGERefrigeratorCoordinator,
-        compartment: str,
-        minimum: int,
-        maximum: int,
-        include_device_services: bool,
     ) -> None:
-        """Create one independent temperature tile for HomeKit."""
+        """Create all services supported by the selected refrigerator."""
         super().__init__(driver, display_name)
         self.hass = hass
         self.coordinator = coordinator
-        self._compartment = compartment
-        self._include_device_services = include_device_services
         info = coordinator.device.device_info
         accessory_info = self.get_service("AccessoryInformation")
         accessory_info.configure_char("Manufacturer", value="LG Electronics")
         accessory_info.configure_char("Model", value=info.model_name)
-        accessory_info.configure_char(
-            "SerialNumber", value=f"{info.device_id}-{compartment}"
-        )
+        accessory_info.configure_char("SerialNumber", value=info.device_id)
 
-        self._current, self._target = self._add_thermostat(
-            display_name, compartment, minimum, maximum
+        self._fridge_current, self._fridge_target = self._add_thermostat(
+            "Refrigerador", "fridge", "fridge", -5, 15
+        )
+        self._freezer_current, self._freezer_target = self._add_thermostat(
+            "Congelador", "freezer", "freezer", -35, 10
         )
 
         self._door_state = None
-        if include_device_services and str(coordinator.data.door_opened_state) != "-":
+        if str(coordinator.data.door_opened_state) != "-":
             door = self.add_preload_service(
                 "ContactSensor", chars=["Name"], unique_id="door"
             )
@@ -109,23 +104,22 @@ class LGERefrigeratorCompartmentAccessory(Accessory):
             self._door_state = door.configure_char("ContactSensorState")
 
         self._feature_states: dict[str, Any] = {}
-        if include_device_services:
-            for feature, name in _FEATURE_NAMES.items():
-                if coordinator.supports(feature):
-                    service = self.add_preload_service(
-                        "Switch", chars=["Name"], unique_id=feature
-                    )
-                    service.configure_char("Name", value=name)
-                    self._feature_states[feature] = service.configure_char(
-                        "On",
-                        setter_callback=lambda value, key=feature: self._set_feature(
-                            key, value
-                        ),
-                    )
+        for feature, name in _FEATURE_NAMES.items():
+            if coordinator.supports(feature):
+                service = self.add_preload_service(
+                    "Switch", chars=["Name"], unique_id=feature
+                )
+                service.configure_char("Name", value=name)
+                self._feature_states[feature] = service.configure_char(
+                    "On",
+                    setter_callback=lambda value, key=feature: self._set_feature(
+                        key, value
+                    ),
+                )
 
         self._filter_life = None
         self._filter_indication = None
-        if include_device_services and coordinator.supports(FEATURE_WATER_FILTER):
+        if coordinator.supports(FEATURE_WATER_FILTER):
             service = self.add_preload_service(
                 "FilterMaintenance",
                 chars=["Name", "FilterLifeLevel", "FilterChangeIndication"],
@@ -139,6 +133,7 @@ class LGERefrigeratorCompartmentAccessory(Accessory):
         self,
         name: str,
         unique_id: str,
+        compartment: str,
         minimum: int,
         maximum: int,
     ) -> tuple[Any, Any]:
@@ -156,15 +151,15 @@ class LGERefrigeratorCompartmentAccessory(Accessory):
         target = service.configure_char(
             "TargetTemperature",
             properties={"minValue": minimum, "maxValue": maximum, "minStep": 0.1},
-            setter_callback=self._set_temperature,
+            setter_callback=lambda value: self._set_temperature(compartment, value),
         )
         return current, target
 
-    def _set_temperature(self, value: float) -> None:
+    def _set_temperature(self, compartment: str, value: float) -> None:
         """Translate Celsius HAP input to the scale configured in the refrigerator."""
         self.hass.async_create_task(
             self.coordinator.async_set_temperature(
-                self._compartment, self._from_homekit_celsius(float(value))
+                compartment, self._from_homekit_celsius(float(value))
             )
         )
 
@@ -173,12 +168,14 @@ class LGERefrigeratorCompartmentAccessory(Accessory):
         self.hass.async_create_task(self.coordinator.async_set_feature(feature, bool(value)))
 
     def update_from_coordinator(self) -> None:
-        """Push one ThinQ update to this compartment's HomeKit services."""
+        """Push one ThinQ update to all HomeKit services."""
         data = self.coordinator.data
-        value = data.temp_fridge if self._compartment == "fridge" else data.temp_freezer
-        self._update_thermostat(value, self._current, self._target)
-        if not self._include_device_services:
-            return
+        self._update_thermostat(
+            data.temp_fridge, self._fridge_current, self._fridge_target
+        )
+        self._update_thermostat(
+            data.temp_freezer, self._freezer_current, self._freezer_target
+        )
         if self._door_state is not None:
             self._door_state.set_value(
                 CONTACT_OPEN
@@ -196,7 +193,7 @@ class LGERefrigeratorCompartmentAccessory(Accessory):
                 )
 
     def _update_thermostat(self, value: Any, current: Any, target: Any) -> None:
-        """Update this HAP thermostat from its ThinQ setting."""
+        """Update one HAP thermostat from its ThinQ setting."""
         raw_value = self._as_float(value)
         if raw_value is None:
             return
@@ -232,7 +229,7 @@ class LGERefrigeratorHomeKitBridge:
         coordinator: LGERefrigeratorCoordinator,
         shared_zeroconf: "_SharedZeroconfProxy",
     ) -> None:
-        """Synchronously construct the HAP bridge and its compartment accessories."""
+        """Synchronously construct HAP state and one refrigerator accessory."""
         self.hass = hass
         self.entry = entry
         self.coordinator = coordinator
@@ -253,29 +250,12 @@ class LGERefrigeratorHomeKitBridge:
         if isinstance(self.driver.state.pincode, str):
             self.driver.state.pincode = self.driver.state.pincode.encode()
 
-        self.accessory = Bridge(self.driver, entry.data[CONF_HOMEKIT_NAME])
-        self.refrigerator = LGERefrigeratorCompartmentAccessory(
+        self.accessory = LGERefrigeratorAccessory(
             self.driver,
-            "Refrigerador",
+            entry.data[CONF_HOMEKIT_NAME],
             hass,
             coordinator,
-            "fridge",
-            -5,
-            15,
-            include_device_services=True,
         )
-        self.freezer = LGERefrigeratorCompartmentAccessory(
-            self.driver,
-            "Congelador",
-            hass,
-            coordinator,
-            "freezer",
-            -35,
-            10,
-            include_device_services=False,
-        )
-        self.accessory.add_accessory(self.refrigerator)
-        self.accessory.add_accessory(self.freezer)
         self.driver.add_accessory(self.accessory)
         self._remove_listener: Callable[[], None] | None = None
         self._remove_stop_listener: Callable[[], None] | None = None
@@ -381,9 +361,8 @@ class LGERefrigeratorHomeKitBridge:
 
     @callback
     def _update_from_coordinator(self) -> None:
-        """Update every child accessory from one ThinQ coordinator update."""
-        self.refrigerator.update_from_coordinator()
-        self.freezer.update_from_coordinator()
+        """Update the single HAP accessory from one ThinQ coordinator update."""
+        self.accessory.update_from_coordinator()
 
     @callback
     def _async_check_pairing(self, _now: datetime) -> None:
