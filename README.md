@@ -4,59 +4,61 @@
   <img src="assets/logo.webp" alt="LGE Refrigerator" width="160">
 </p>
 
-Integración HACS independiente para **refrigeradores LG ThinQ Wi-Fi**. No crea
-entidades para lavadoras, aires acondicionados ni ningún otro equipo LG.
+Standalone HACS integration for **LG ThinQ Wi-Fi refrigerators**. It supports
+refrigerators only: no washers, air conditioners, or other LG appliances are
+created.
 
-Incluye un accesorio HomeKit nativo: Casa ve un solo `Refrigerador` con sus
-servicios agrupados, sin usar el puente genérico de Home Assistant y sin un
-segundo sondeo de LG.
+It includes a native HomeKit accessory. Apple Home sees one `Refrigerador`
+accessory with its services grouped together, without Home Assistant's generic
+HomeKit bridge and without a second LG polling client.
 
-## Entidades
+## Entities
 
-Por cada refrigerador seleccionado crea:
+For each selected refrigerator, the integration creates:
 
-- `climate`: Fridge y Freezer, con rango real del modelo y control de objetivo.
-- `binary_sensor`: Door open.
-- `sensor`: Fridge temperature y Freezer temperature.
-- `switch`: Ice Plus, Express Freezer, Express Fridge y Eco Friendly, solo si el
-  modelo los expone.
-- `sensor`: Water filter remaining y Fresh air filter remaining, solo si el
-  modelo los expone.
+- `climate`: refrigerator and freezer controls, using the model's real target
+  temperature range.
+- `binary_sensor`: door-open status.
+- `sensor`: refrigerator and freezer temperatures.
+- `switch`: Ice Plus, Express Freezer, Express Fridge, and Eco Friendly when
+  supported by the model.
+- `sensor`: remaining water-filter and fresh-air-filter life when supported by
+  the model.
 
-En HomeKit se presenta como un solo accesorio con dos termostatos, el sensor de
-puerta, los interruptores disponibles y mantenimiento de filtro de agua cuando
-el modelo lo soporta.
+In HomeKit, these are exposed through one accessory with refrigerator and freezer
+thermostat services, the door sensor, available switches, and water-filter
+maintenance when the model supports it.
 
-## Instalación con HACS
+## Installation with HACS
 
-1. HACS → Integraciones → menú ⋮ → **Repositorios personalizados**.
-2. Añade `https://github.com/tdalejandro/lge-refrigerator` con categoría
-   **Integration**.
-3. Instala **LGE Refrigerator** y reinicia Home Assistant.
-4. Ajustes → Dispositivos y servicios → Añadir integración → **LGE Refrigerator**.
+1. In HACS, go to **Integrations** → the ⋮ menu → **Custom repositories**.
+2. Add `https://github.com/tdalejandro/lge-refrigerator` with the
+   **Integration** category.
+3. Install **LGE Refrigerator** and restart Home Assistant.
+4. Go to **Settings** → **Devices & services** → **Add integration** →
+   **LGE Refrigerator**.
 
-El flujo pide país e idioma de la cuenta LG ThinQ. Para cuentas creadas con
-Google, Apple, Facebook o Amazon, activa el inicio mediante navegador. La
-contraseña no se guarda: Home Assistant conserva solamente el token renovable de
-LG.
+The setup flow asks for your LG ThinQ account country and language. For accounts
+created with Google, Apple, Facebook, or Amazon, enable browser-based sign-in.
+Your password is never stored; Home Assistant stores only LG's renewable token.
 
-El puerto HomeKit predeterminado es `21100`. Tras crear la entrada, Home Assistant
-muestra una notificación persistente con un QR de emparejamiento y el código PIN
-de respaldo.
+The default HomeKit port is `21100`. Before pairing, Home Assistant displays a
+notification with the HomeKit QR code and fallback PIN. The notification is
+removed automatically after pairing.
 
-## Límites de LG
+## LG rate limits
 
-LG puede bloquear temporalmente cuentas con sondeo demasiado frecuente. La
-integración fija un intervalo de 300 segundos y comparte ese único estado con
-las entidades HA y el accesorio HomeKit.
+LG may temporarily block accounts that are polled too frequently. This
+integration uses a fixed 300-second interval and shares that single state between
+the Home Assistant entities and the HomeKit accessory.
 
-Antes de activar esta integración, desactiva o elimina la instancia anterior de
-SmartThinQ que use la misma cuenta, para no duplicar llamadas a LG.
+Before enabling this integration, disable or remove any previous SmartThinQ
+instance that uses the same account to avoid duplicate LG requests.
 
-## Créditos y licencia
+## Credits and license
 
-El cliente ThinQ vendorizado procede de
+The vendored ThinQ client is based on
 [ollo69/ha-smartthinq-sensors](https://github.com/ollo69/ha-smartthinq-sensors).
-El diseño de servicios de refrigerador toma como referencia
+The refrigerator service design references
 [nVuln/homebridge-lg-thinq](https://github.com/nVuln/homebridge-lg-thinq).
-Ambos se distribuyen bajo Apache-2.0; consulta [NOTICE](NOTICE).
+Both are distributed under Apache-2.0; see [NOTICE](NOTICE).
