@@ -32,7 +32,7 @@ maintenance when the model supports it.
 ## Installation with HACS
 
 1. In HACS, go to **Integrations** → the ⋮ menu → **Custom repositories**.
-2. Add `https://github.com/tdalejandro/lge-refrigerator` with the
+2. Add `https://github.com/tdalejandro/lge_refrigerator_hacs` with the
    **Integration** category.
 3. Install **LGE Refrigerator** and restart Home Assistant.
 4. Go to **Settings** → **Devices & services** → **Add integration** →
